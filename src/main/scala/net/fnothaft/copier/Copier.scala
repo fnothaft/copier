@@ -15,6 +15,7 @@
  */
 package net.fnothaft.copier
 
+import java.io.{ InputStream, OutputStream }
 import java.net.{ ConnectException, URL, URLConnection }
 import org.apache.commons.io.IOUtils
 import org.apache.hadoop.conf.Configuration
@@ -104,8 +105,79 @@ object Copier extends BDGCommandCompanion with Logging {
 
     // create our streams
     val is = cxn.getInputStream()
+
+    if (appendToFiles) {
+      if (outFs.exists(outPath)) {
+        // how many bytes are to be downloaded, and how many have we written?
+        val bytesInResource = cxn.getContentLengthLong
+        val bytesWritten = outFs.getFileStatus(outPath).getLen
+
+        if (bytesInResource > bytesWritten) {
+          log.info("Have already downloaded %d out of %d bytes to file %s. Resuming...".format(bytesWritten, bytesInResource, outPath))
+
+          // open file in append mode
+          val os = outFs.append(outPath, bufferSize)
+
+          // copy the file
+          doCopy(is, os, outPath)
+        } else {
+          log.info("File %s appears to have already been completely downloaded. Skipping...".format(url))
+          0L
+        }
+      } else {
+        log.info(
+          "In append mode, but file %s did not exist. Downloading whole file.".format(
+            outPath))
+        downloadWholeFile(is,
+          outFs, outPath,
+          overwriteFiles,
+          bufferSize, replication, blockSize)
+      }
+    } else {
+      downloadWholeFile(is,
+        outFs, outPath,
+        overwriteFiles,
+        bufferSize, replication, blockSize)
+    }
+  }
+
+  /**
+   * Downloads the entirety of a file.
+   * 
+   * @param is The stream to the file.
+   * @param outFs The file system to write to.
+   * @param outPath The path to write the file to.
+   * @param overwriteFiles If true, overwrites existing files.
+   * @param bufferSize The buffer size to use on the output stream.
+   * @param replication The HDFS replication factor to use.
+   * @param blockSize The HDFS block size to use.
+   * @return Returns the number of bytes written to disk.
+   */
+  private def downloadWholeFile(is: InputStream,
+                                outFs: FileSystem,
+                                outPath: Path,
+                                overwriteFiles: Boolean,
+                                bufferSize: Int,
+                                replication: Int,
+                                blockSize: Int): Long = {
+
     val os = outFs.create(outPath,
       overwriteFiles, bufferSize, replication.toShort, blockSize)
+
+    doCopy(is, os, outPath)
+  }
+
+  /**
+   * Copies all the bytes left in a stream to another stream.
+   *
+   * @param is The stream to copy from.
+   * @param os The stream to copy to.
+   * @param outPath The path to write the file to.
+   * @return Returns the number of bytes written to disk.
+   */
+  private def doCopy(is: InputStream,
+                     os: OutputStream,
+                     outPath: Path): Long = {
 
     try {
       // copy to and fro
@@ -139,8 +211,6 @@ object Copier extends BDGCommandCompanion with Logging {
            blockSize: Int,
            replication: Int,
            bufferSize: Int): Long = {
-
-    require(!appendToFiles, "Appending to files is not currently supported.")
 
     // how many files do we have to download?
     // we will repartition into one per partition
@@ -185,6 +255,10 @@ class CopierArgs extends Args4jBase {
     name = "-overwrite",
     usage = "If true, overwrites files that already exist on disk.")
   var overwrite = false
+  @Args4jOption(required = false,
+    name = "-append",
+    usage = "If true, appends to files that already exist on disk.")
+  var append = false
 }
 
 class Copier(protected val args: CopierArgs) extends BDGSparkCommand[CopierArgs] {
@@ -192,12 +266,15 @@ class Copier(protected val args: CopierArgs) extends BDGSparkCommand[CopierArgs]
 
   def run(sc: SparkContext) {
 
+    require(!(args.append && args.overwrite),
+      "Cannot set both -append and -overwrite.")
+
     val files = sc.textFile(args.inputPath)
 
     companion.copy(files,
       args.outputPath,
       args.overwrite,
-      false,
+      args.append,
       args.blockSize,
       args.replication,
       args.bufferSize)
