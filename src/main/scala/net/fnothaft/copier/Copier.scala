@@ -143,7 +143,7 @@ object Copier extends BDGCommandCompanion with Logging {
 
   /**
    * Downloads the entirety of a file.
-   * 
+   *
    * @param is The stream to the file.
    * @param outFs The file system to write to.
    * @param outPath The path to write the file to.
